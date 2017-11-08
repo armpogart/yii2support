@@ -3,8 +3,6 @@ package com.nvlad.yii2support.common;
 import com.intellij.psi.PsiElement;
 import com.jetbrains.php.lang.psi.elements.MethodReference;
 import com.jetbrains.php.lang.psi.elements.PhpExpression;
-import com.jetbrains.php.lang.psi.elements.PhpPsiElement;
-import com.jetbrains.php.lang.psi.elements.impl.MethodReferenceImpl;
 import org.jetbrains.annotations.Nullable;
 
 /**
@@ -24,7 +22,7 @@ public class MethodUtils {
             MethodReference referenceMethod = (MethodReference) psiElement;
             if (referenceMethod.getName() != null && referenceMethod.getName().equals("createObject")
                     && referenceMethod.getParameters().length > 0) {
-                PhpExpression classReference = ((MethodReferenceImpl) psiElement).getClassReference();
+                PhpExpression classReference = ((MethodReference) psiElement).getClassReference();
                 if (classReference != null && classReference.getName() != null && classReference.getName().equals("Yii")) {
                     return true;
                 }
