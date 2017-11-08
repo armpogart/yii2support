@@ -1,10 +1,10 @@
 package com.nvlad.yii2support.common;
 
 import com.intellij.codeInsight.lookup.LookupElementBuilder;
-import com.intellij.database.model.DasColumn;
-import com.intellij.database.model.DasObject;
-import com.intellij.database.model.DasTable;
-import com.intellij.database.model.basic.BasicTable;
+import com.intellij.database.model.*;
+import com.intellij.database.model.basic.BasicDatabase;
+import com.intellij.database.model.basic.BasicSchema;
+import com.intellij.database.model.postgres.PostgresSchema;
 import com.intellij.database.psi.*;
 import com.intellij.openapi.editor.Document;
 import com.intellij.openapi.project.Project;
@@ -110,7 +110,7 @@ public class DatabaseUtils {
         Matcher m = r.matcher(condition);
         while (m.find()) {
             String param = m.group(1);
-            if (! includeColon)
+            if (!includeColon)
                 param = param.replace(":", "");
             matches.add(param);
         }
@@ -126,6 +126,7 @@ public class DatabaseUtils {
     }
 
     private static Pattern tablePrefix = Pattern.compile("(\\{\\{(%?[\\w\\-. ]+%?)}}|\\[\\[([\\w\\-. ]+)]])");
+
     public static String AddTablePrefix(String table, boolean force, Project project) {
         table = ClassUtils.removeQuotes(table);
         Matcher matcher = tablePrefix.matcher(table);
@@ -205,7 +206,7 @@ public class DatabaseUtils {
                         if (resolved != null && resolved instanceof ClassConstImpl) {
                             ClassConstImpl constant = (ClassConstImpl) resolved;
                             if (constant.getChildren().length > 0) {
-                                String table =  ((StringLiteralExpressionImpl) constant.getChildren()[0]).getContents();
+                                String table = ((StringLiteralExpressionImpl) constant.getChildren()[0]).getContents();
                                 return AddTablePrefix(table, false, phpClass.getProject());
                             }
                         }
@@ -262,43 +263,55 @@ public class DatabaseUtils {
     }
 
     public static boolean isTableExists(String table, Project project) {
-        if(table == null)
+        if (table == null)
             return false;
         DbPsiFacade facade = DbPsiFacade.getInstance(project);
-        List<DbDataSource> dataSources = facade.getDataSources();
-        table = ClassUtils.removeQuotes(table);
+        return findTable(facade.getDataSources(), ClassUtils.removeQuotes(table)) != null;
+    }
 
-        for (DbDataSource source : dataSources) {
-            for (Object item : source.getModel().traverser().children(source.getModel().getCurrentRootNamespace())) {
-                if (item instanceof DasTable && ((DasTable) item).getName().equals(table)) {
-                   return true;
+    private static DasTable findTable(Iterable<? extends DasObject> items, String tableName) {
+        for (DasObject item : items) {
+            if (item instanceof DasTable) {
+                if (item.getName().equals(tableName)) {
+                    return (DasTable) item;
                 }
+            } else if (item instanceof DasNamespace) {
+                if (((DbElement) item).getDelegate() instanceof PostgresSchema) {
+                    PostgresSchema schema = (PostgresSchema) ((DbElement) item).getDelegate();
+                    if (schema != null) {
+                        return findTable(schema.getTables(), tableName);
+                    }
+                }
+                return findTable(item.getDbChildren(DasTable.class, item.getKind()), tableName);
+            } else if (item instanceof DbDataSource) {
+                DasModel model = ((DbDataSource) item).getModel();
+                DasTable basicTable = findTable(model.traverser().children(model.getCurrentRootNamespace()), tableName);
+                if (basicTable != null) {
+                    return basicTable;
+                }
+//            } else if (item instanceof BasicSchema) {
+//                return findTable(((BasicSchema) item).getDbChildren(), tableName);
+//            } else if (item instanceof BasicDatabase) {
+//                return findTable(((BasicDatabase) item).getDbChildren(), tableName);
             }
         }
-        return false;
+        return null;
     }
 
     public static ArrayList<String> getColumnsByTable(String table, Project project) {
-        String prefixedTable = AddTablePrefix(table, true, project);
+        ArrayList<String> list = new ArrayList<>();
+        if (table == null)
+            return list;
 
         DbPsiFacade facade = DbPsiFacade.getInstance(project);
-        List<DbDataSource> dataSources = facade.getDataSources();
-
-        ArrayList<String> list = new ArrayList<>();
-        if(table == null)
-            return list;
-        table = ClassUtils.removeQuotes(prefixedTable);
-        for (DbDataSource source : dataSources) {
-            for (Object item : source.getModel().traverser().children(source.getModel().getCurrentRootNamespace())) {
-
-                if (item instanceof DasTable && ((DasTable) item).getName().equals(prefixedTable)) {
-                    TableInfo tableInfo = new TableInfo((DasTable) item);
-                    for (DasColumn column : tableInfo.getColumns()) {
-                        list.add(ClassUtils.removeQuotes(column.getName()));
-                    }
-                }
+        DasTable basicTable = findTable(facade.getDataSources(), AddTablePrefix(table, true, project));
+        if (basicTable != null) {
+            TableInfo tableInfo = new TableInfo(basicTable);
+            for (DasColumn column : tableInfo.getColumns()) {
+                list.add(ClassUtils.removeQuotes(column.getName()));
             }
         }
+
         return list;
     }
 
@@ -306,9 +319,8 @@ public class DatabaseUtils {
         if (property == null)
             return true;
 
-        for (String column : columns)
-            if (column.equals(property.getName()))
-                return true;
+        if (columns.contains(property.getName()))
+            return true;
 
         return ClassUtils.isFieldExists(phpClass, property.getName(), true);
 
@@ -320,49 +332,40 @@ public class DatabaseUtils {
         ArrayList<String> columns = getColumnsByTable(table, phpClass.getProject());
         for (PhpDocPropertyTag tag : propertyTags) {
             PhpDocProperty property = tag.getProperty();
-            if (!isPropertyUsed(property, columns, phpClass ))
+            if (!isPropertyUsed(property, columns, phpClass))
                 unusedProperties.add(tag);
         }
         return unusedProperties;
     }
 
     public static ArrayList<VirtualProperty> getNotDeclaredColumns(String table, Collection<Field> fields, Project project) {
-
-        DbPsiFacade facade = DbPsiFacade.getInstance(project);
-        List<DbDataSource> dataSources = facade.getDataSources();
-
         final ArrayList<VirtualProperty> result = new ArrayList<>();
         if (table == null)
             return result;
-        for (DbDataSource source : dataSources) {
-            for (Object item : source.getModel().traverser().children(source.getModel().getCurrentRootNamespace())) {
-                table = ClassUtils.removeQuotes(table);
-                if (item instanceof DasTable && ((DasTable) item).getName().equals(table)) {
-                    TableInfo tableInfo = new TableInfo((DasTable) item);
 
-                    for (DasColumn column : tableInfo.getColumns()) {
-                        boolean found = false;
-                        PhpDocProperty prevProperty = null;
-                        for (Field field : fields) {
-
-                            if (field != null && field.getName().equals(column.getName())) {
-                                found = true;
-                                break;
-                            }
-                        }
-                        if (!found) {
-                            VirtualProperty newItem = new VirtualProperty(column.getName(),
-                                    column.getDataType().typeName,
-                                    column.getDataType().toString(),
-                                    column.getComment(),
-                                     null);
-                            result.add(newItem);
-                        }
+        DbPsiFacade facade = DbPsiFacade.getInstance(project);
+        DasTable basicTable = findTable(facade.getDataSources(), ClassUtils.removeQuotes(table));
+        if (basicTable != null) {
+            TableInfo tableInfo = new TableInfo(basicTable);
+            for (DasColumn column : tableInfo.getColumns()) {
+                boolean found = false;
+                for (Field field : fields) {
+                    if (field != null && field.getName().equals(column.getName())) {
+                        found = true;
+                        break;
                     }
-
+                }
+                if (!found) {
+                    VirtualProperty newItem = new VirtualProperty(column.getName(),
+                            column.getDataType().typeName,
+                            column.getDataType().toString(),
+                            column.getComment(),
+                            null);
+                    result.add(newItem);
                 }
             }
         }
+
         return result;
     }
 }
